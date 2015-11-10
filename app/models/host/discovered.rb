@@ -1,3 +1,6 @@
+require 'foreman_discovery/proxy_operations'
+include Foreman::Renderer
+
 class Host::Discovered < ::Host::Base
   include ScopedSearchExtensions
 
@@ -25,8 +28,8 @@ class Host::Discovered < ::Host::Base
   scoped_search :in => :discovery_attribute_set, :on => :disks_size, :rename => :disks_size, :complete_value => true, :only_explicit => true
 
   default_scope lambda {
-    where(taxonomy_conditions).order("hosts.created_at DESC")
-  }
+                  where(taxonomy_conditions).order("hosts.created_at DESC")
+                }
 
   def self.import_host_and_facts facts
     raise(::Foreman::Exception.new(N_("Invalid facts, must be a Hash"))) unless facts.is_a?(Hash)
@@ -38,14 +41,30 @@ class Host::Discovered < ::Host::Base
 
     # construct hostname
     prefix_from_settings = Setting[:discovery_prefix]
-    hostname_prefix = prefix_from_settings if prefix_from_settings.present? && prefix_from_settings.match(/^[a-zA-Z].*/)
-    hostname_prefix ||= 'mac'
-    hostname = FacterUtils::bootif_mac(facts).try(:downcase).try(:gsub,/:/,'').try(:sub,/^/, hostname_prefix)
+    if facts["racktables_hostname"].nil? == false
+      hostname = facts["racktables_hostname"].try(:downcase)
+    else
+      hostname_prefix = prefix_from_settings if prefix_from_settings.present? && prefix_from_settings.match(/^[a-zA-Z].*/)
+      hostname_prefix ||= 'mac'
+      hostname = FacterUtils::bootif_mac(facts).try(:downcase).try(:gsub,/:/,'').try(:sub,/^/, hostname_prefix)
+    end
+    # create new host record
+    h = ::Host::Discovered.find_by_name hostname
+    h ||= Host.new :name => hostname, :type => "Host::Discovered"
+    h.type = "Host::Discovered"
 
     # create new host record
     h = ::Host::Discovered.find_by_name hostname
     h ||= Host.new :name => hostname, :type => "Host::Discovered"
     h.type = "Host::Discovered"
+
+    template = unattended_render ConfigTemplate.find_by_name("Discovery Image PXE").template
+    begin
+      Subnet.subnet_for(facts['ipaddress']).tftp_proxy.set h.mac, :pxeconfig => template
+    rescue Exception => e
+      logger.info "Could not set tftp_proxy from Proxy: #{e}"
+    end
+    logger.info "Done setting tftp_proxy in self.importHostAndFacts"
 
     # and save (interfaces are created via puppet parser extension)
     h.save(:validate => false) if h.new_record?
@@ -84,13 +103,13 @@ class Host::Discovered < ::Host::Base
       # set location and organization
       if SETTINGS[:locations_enabled]
         self.location = Location.find_by_name(Setting[:discovery_location]) ||
-          subnet.try(:locations).try(:first) ||
-          Location.first
+            subnet.try(:locations).try(:first) ||
+            Location.first
       end
       if SETTINGS[:organizations_enabled]
         self.organization = Organization.find_by_name(Setting[:discovery_organization]) ||
-          subnet.try(:organizations).try(:first) ||
-          Organization.first
+            subnet.try(:organizations).try(:first) ||
+            Organization.first
       end
     else
       raise(::Foreman::Exception.new(N_("Unable to assign subnet, primary interface is missing IP address")))
@@ -123,43 +142,39 @@ class Host::Discovered < ::Host::Base
     read_attribute(:root_pass).blank? ? (hostgroup.try(:root_pass) || Setting[:root_pass]) : read_attribute(:root_pass)
   end
 
-  def proxied?
-    subnet.present? && subnet.discovery.present?
-  end
-
   def proxy_url
-    proxied? ? subnet.discovery.url + "/discovery/#{self.ip}" : "https://#{self.ip}:8443"
+    if subnet.present? && subnet.discovery.present?
+      { :url => subnet.discovery.url + "/discovery/#{self.ip}", :type => 'proxy'}
+    else
+      { :url => "http://#{self.ip}:8443", :type => 'foreman' }
+    end
   end
 
   def refresh_facts
-    facts = ::ForemanDiscovery::NodeAPI::Inventory.new(:url => proxy_url).facter
-    self.class.import_host_and_facts facts
-  rescue Exception => e
-    raise _("Could not get facts from proxy %{url}: %{error}") % {:url => proxy_url, :error => e}
+    # TODO: Can we rely on self.ip? The lease might expire/change....
+    begin
+      logger.debug "retrieving facts from proxy from url: #{proxy_url[:url]}"
+      facts = ForemanDiscovery::ProxyOperations.new(:url => proxy_url[:url], :operation => 'facts').parse_get_operation
+    rescue Exception => e
+      raise _("Could not get facts from proxy %{url}: %{error}") % {:url => proxy_url[:url], :error => e}
+    end
+
+    return self.class.import_host_and_facts facts
   end
 
-  def reboot legacy_api = ForemanDiscovery::HostConverter.legacy_host(self)
-    if legacy_api
-      if proxied?
-        resource = ::ForemanDiscovery::NodeAPI::Power.legacy_proxied_service(:url => proxy_url)
-      else
-        resource = ::ForemanDiscovery::NodeAPI::Power.legacy_direct_service(:url => proxy_url)
-      end
+  def reboot
+    logger.info "ForemanDiscovery: Rebooting #{name}"
+    proxy_url = self.proxy_url
+
+    if proxy_url[:type] == 'proxy'
+      ForemanDiscovery::ProxyOperations.new(:url => proxy_url[:url], :operation => 'reboot').
+          parse_put_operation.try(:fetch, 'result')
     else
-      resource = ::ForemanDiscovery::NodeAPI::Power.service(:url => proxy_url)
+      ::ProxyAPI::BMC.new(:url => "http://#{self.ip}:8443").power :action => "cycle"
     end
-    resource.reboot
   rescue => e
     ::Foreman::Logging.exception("Unable to reboot #{name}", e)
-    raise ::Foreman::WrappedException.new(e, N_("Unable to reboot %{name} via %{url}: %{msg}"), :name => name, :url => proxy_url, :msg => e.to_s)
-  end
-
-  def kexec json
-    resource = ::ForemanDiscovery::NodeAPI::Power.service(:url => proxy_url)
-    resource.kexec json
-  rescue => e
-    ::Foreman::Logging.exception("Unable to perform kexec on #{name}", e)
-    raise ::Foreman::WrappedException.new(e, N_("Unable to perform kexec on %{name} via %{url}: %{msg}"), :name => name, :url => proxy_url, :msg => e.to_s)
+    raise ::Foreman::WrappedException.new(e, N_("Unable to reboot %{name}: %{msg}"), :name => name, :msg => e.to_s)
   end
 
   def self.model_name
