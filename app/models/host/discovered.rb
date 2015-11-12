@@ -58,6 +58,10 @@ class Host::Discovered < ::Host::Base
     h ||= Host.new :name => hostname, :type => "Host::Discovered"
     h.type = "Host::Discovered"
 
+    # and save (interfaces are created via puppet parser extension)
+    h.save(:validate => false) if h.new_record?
+    state = h.import_facts(facts)
+
     template = unattended_render ConfigTemplate.find_by_name("Discovery Image PXE").template
     begin
       Subnet.subnet_for(facts['ipaddress']).tftp_proxy.set h.mac, :pxeconfig => template
@@ -66,9 +70,6 @@ class Host::Discovered < ::Host::Base
     end
     logger.info "Done setting tftp_proxy in self.importHostAndFacts"
 
-    # and save (interfaces are created via puppet parser extension)
-    h.save(:validate => false) if h.new_record?
-    state = h.import_facts(facts)
     return h, state
   end
 
@@ -170,7 +171,7 @@ class Host::Discovered < ::Host::Base
       ForemanDiscovery::ProxyOperations.new(:url => proxy_url[:url], :operation => 'reboot').
           parse_put_operation.try(:fetch, 'result')
     else
-      ::ProxyAPI::BMC.new(:url => "http://#{self.ip}:8443").power :action => "cycle"
+      ::ProxyAPI::BMC.new(:url => "http://#{self.ip}:8448").power :action => "cycle"
     end
   rescue => e
     ::Foreman::Logging.exception("Unable to reboot #{name}", e)
