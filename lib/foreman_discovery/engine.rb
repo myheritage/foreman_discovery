@@ -39,12 +39,14 @@ module ForemanDiscovery
 
     # Add any db migrations
     initializer "foreman_discovery.load_app_instance_data" do |app|
-      app.config.paths['db/migrate'] += ForemanDiscovery::Engine.paths['db/migrate'].existent
+      ForemanDiscovery::Engine.paths['db/migrate'].existent.each do |path|
+        app.config.paths['db/migrate'] << path
+      end
     end
 
     initializer 'foreman_discovery.register_plugin', :after=> :finisher_hook do |app|
       Foreman::Plugin.register :foreman_discovery do
-        requires_foreman '>= 1.9.0'
+        requires_foreman '>= 1.11.0'
 
         # discovered hosts permissions
         security_block :discovery do
@@ -147,10 +149,6 @@ module ForemanDiscovery
       end
     end
 
-    initializer "foreman_discovery.load_app_instance_data" do |app|
-      app.config.paths['db/migrate'] += ForemanDiscovery::Engine.paths['db/migrate'].existent
-    end
-
     initializer "foreman_discovery.apipie" do
       if Apipie.configuration.respond_to?(:checksum_path)
         Apipie.configuration.checksum_path += ['/discovered_hosts/']
@@ -160,12 +158,8 @@ module ForemanDiscovery
     # Include extensions to models in this config.to_prepare block
     config.to_prepare do
 
-      begin
-        require_dependency 'puppet_fact_parser'
-        ::PuppetFactParser.send :include, PuppetFactParserExtensions
-      rescue LoadError
-        Rails.logger.warn 'PuppetFactParser not found, not loading Parser extensions'
-      end
+      # Fact parsing
+      ::FactParser.register_fact_parser(:foreman_discovery, ForemanDiscovery::FactParser)
 
       # Model extensions
       ::Host::Managed.send :include, Host::ManagedExtensions

@@ -4,6 +4,8 @@ include Foreman::Renderer
 class Host::Discovered < ::Host::Base
   include ScopedSearchExtensions
 
+  attr_accessible :discovery_rule_id
+
   belongs_to :hostgroup
   has_one    :discovery_attribute_set, :foreign_key => :host_id, :dependent => :destroy
 
@@ -90,9 +92,9 @@ class Host::Discovered < ::Host::Base
     super
   end
 
-  def populate_fields_from_facts(facts = self.facts_hash, type = 'puppet')
+  def populate_fields_from_facts(facts = self.facts_hash, ignored_type)
     # detect interfaces and primary interface using extensions
-    parser = super(facts, type)
+    parser = super(facts, :foreman_discovery)
 
     # set additional discovery attributes
     primary_ip = self.primary_interface.ip
